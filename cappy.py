@@ -1,90 +1,82 @@
-#!/usr/bin/python
-
 import argparse
+import cv2
 import requests
-from bs4 import BeautifulSoup
-from datetime import datetime
+import shutil
+import time
+from tesserocr import PyTessBaseAPI, PSM, OEM
 
 def main():
-	parser = argparse.ArgumentParser(usage='%(prog)s [options]', description='defconscrap, the Defense Contract Scraper')
+	parser = argparse.ArgumentParser(usage='%(prog)s [options] posturl', description='Cappy, the little captcha solver.')
 
 	parser.version = "0.1"
-	parser.add_argument("-p", "--pages", type=int, default=1, help="number of pages of links to scrape. Each page has links to 10 dates. (default: 1)")
+	parser.add_argument("posturl", metavar="posturl", type=str, help="the url to POST the captcha to")
+	parser.add_argument("-i", "--imageurl", type=str, help="the url to grab the captcha (default: <posturl>/craptcha.php")
+	parser.add_argument("-o", "--output", type=str, default="/tmp/captcha.png", help="where to save the temporary captcha file (default: /tmp/captcha)")
+	parser.add_argument("-s", "--success", type=str, default=" more!", help="text to check response for to determine successful captcha submission (default:  more!)")
+	parser.add_argument("-e", "--error", type=str, default="Wrong CAPTCHA!", help="text to check response for to determine wrong captcha post (default: Wrong CAPTCHA!)")
+	parser.add_argument("-c", "--count", type=int, default=200, help="total number of captchas to try (default: 200)")
+	parser.add_argument("-n", "--name", type=str, default="captcha", help="field name of captcha (default: captcha)")
 	parser.add_argument("-v", action="version")
 
 	args = parser.parse_args()
-	pages = args.pages
+	posturl = args.posturl
+	imageurl = args.imageurl
+	output = args.output
+	success = args.success
+	wrong = args.error
+	totalcount = args.count
+	captchaname = args.name
 
-  URL_LIST = "https://www.defense.gov/News/Contracts/?Page="
-  
-  awards = []
-  page_num = 1
-  
-  while page_num <= pages:
-    links = scrape_contract_links(URL_LIST, page_num)
-    
-    for link in links:
-      date_content = scrape_single_date(link['link'])
-      awarded_companies = pull_awards(date_content)
-      awards.append({
-        "date": link['date'],
-        "companies": awarded_companies
-      })
-    
-    page_num += 1
-    
-  print(awards)
+	if imageurl == None:
+		imageurl = posturl + "/craptcha.php"
 
-def get_soup(url):
-  page = requests.get(url)
-  soup = BeautifulSoup(page.content, "html.parser")
-  return soup
+	with PyTessBaseAPI(psm=PSM.SINGLE_WORD, oem=OEM.TESSERACT_ONLY) as api:
+		api.SetVariable("tessedit_char_whitelist", "abcdefghijklmnopqrstuvwxyz")
+		
+		image = None
+		count = 0
+		successcount = 0
+		wrongcount = 0
+		ses = requests.Session()
+		starttime = time.time()
 
-def format_date(date):
-  try:
-    datetime_object = datetime.strptime(date, '%b. %d, %Y').date()
-  except Exception as e:
-    print(e)
-  
-  return datetime_object.strftime('%Y-%m-%d')
+		while count < totalcount:
+			res = ses.get(imageurl, stream=True).raw
+			with open(output, "wb") as out_file:
+				shutil.copyfileobj(res, out_file)
+			del res
 
-def scrape_contract_links(url, page_num):
-  soup = get_soup(url + str(page_num))
-  content = soup.find_all("listing-titles-only")
-  links = []
-  
-  for item in content:
-    date = format_date(item.attrs['publish-date-ap'])
-    link = item.attrs['article-url']
-    
-    links.append({
-      "date":date,
-      "link":link
-    })
-  
-  return links
+			image = cv2.imread(output, cv2.IMREAD_GRAYSCALE)
+			image = cv2.resize(image, None, fx=10, fy=10, interpolation=cv2.INTER_LINEAR)
+			image = cv2.GaussianBlur(image, (5,5), 0)
+	#		image = cv2.bilateralFilter(image, 9, 75, 75)
+	#		image = cv2.blur(image, (5,5))
+	#		image = cv2.medianBlur(image, 9)
+			ret, image = cv2.threshold(image, 185, 255, cv2.THRESH_BINARY)
+			cv2.imwrite(output, image)
 
-def scrape_single_date(url):
-  soup = get_soup(url)
-  content = soup.find("div", class_="content")
-  return content
+			api.SetImageFile(output)
+			captcha = api.GetUTF8Text().replace(" ", "").rstrip().lower()
+			content = ses.post(url=posturl, data={captchaname : captcha}).content
 
-def pull_awards(content):
-  awardtexts = ""
-  awards = []
+			count += 1
+			html = str(content)
 
-  try:
-    awardtexts = content.find_all("p")
-  except Exception as e:
-    print(e)
+			if success in html:
+				successcount += 1
+			elif wrong in html:
+				wrongcount += 1
+			else:
+				print(html)
 
-  for award in awardtexts:
-    text = award.text
-    if 'awarded' in text:
-      company = text.split(',', 1)[0]
-      awards.append(company)
-  
-  return awards
-  
+		elapsedtime = time.time() - starttime
+
+	print("Finished")
+	print("Time: " + str(round(elapsedtime)) + " seconds")
+	print("Correct: " + str(successcount))
+	print("Wrong: " + str(wrongcount))
+	print("Percent Correct: " + str(round((successcount/(successcount + wrongcount)) * 100)) + "%")
+	print("Correct solves per 30 seconds: " + str(round((successcount/elapsedtime) * 30)))
+
 if __name__== "__main__":
-  main()
+	main()
